@@ -14,6 +14,7 @@
 #include "engine/rootgraph.hpp"
 #include "engine/midipanic.hpp"
 #include "engine/trace.hpp"
+#include "engine/tasksystem.hpp"
 
 #include "tempo.hpp"
 
@@ -25,7 +26,7 @@ struct RootGraphRender : public AsyncUpdater
 
     RootGraphRender()
     {
-        graphs.ensureStorageAllocated (32);
+        graphs.ensureStorageAllocated (32);        
     }
 
     void handleAsyncUpdate() override
@@ -59,6 +60,11 @@ struct RootGraphRender : public AsyncUpdater
         numOutputChans = numOuts;
         audioTemp.setSize (jmax (numIns, numOuts), numSamples);
         audioOut.setSize (audioTemp.getNumChannels(), audioTemp.getNumSamples());
+
+        for (auto& taskInfo : multiThreadingTaskInfo)
+        {
+            taskInfo.audioTemp.setSize (jmax (numIns, numOuts), numSamples);
+        }
     }
 
     void releaseBuffers()
@@ -68,6 +74,12 @@ struct RootGraphRender : public AsyncUpdater
         midiTemp.clear();
         audioTemp.setSize (1, 1);
         audioOut.setSize (1, 1);
+
+        for (auto& taskInfo : multiThreadingTaskInfo)
+        {
+            taskInfo.midiTemp.clear();
+            taskInfo.audioTemp.setSize(1,1);
+        }
     }
 
     void dumpGraphs()
@@ -96,97 +108,18 @@ struct RootGraphRender : public AsyncUpdater
 
         const int numSamples = buffer.getNumSamples();
         const int numChans = buffer.getNumChannels();
-        const bool graphChanged = lastGraph != currentGraph;
+
         const bool shouldProcess = true;
-        const RootGraph::RenderMode mode = current->getRenderMode();
-        const bool modeChanged = graphChanged && mode != last->getRenderMode();
 
         if (shouldProcess)
         {
-            audioOut.setSize (numChans, numSamples, false, false, true);
-            audioTemp.setSize (numChans, numSamples, false, false, true);
-
-            // clear the mixing area
-            for (int i = numChans; --i >= 0;)
-                audioOut.clear (i, 0, numSamples);
-            midiOut.clear();
-
-            for (auto* const graph : graphs)
+            if (!taskManager)
             {
-                // copy inputs, clear outs if more than input count
-                for (int i = 0; i < numInputChans; ++i)
-                    audioTemp.copyFrom (i, 0, buffer, i, 0, numSamples);
-                for (int i = numInputChans; i < numChans; ++i)
-                    audioTemp.clear (i, 0, numSamples);
-
-                // avoids feedback loop when IO node ins are
-                // connected to IO node outs
-                midiTemp.clear (0, numSamples);
-
-                if ((last == graph && graphChanged && last->isSingle())
-                    || (graphChanged && current != nullptr && current->isSingle() && graph != current))
-                {
-                    // send kill messages to the last graph(s) when the graph changes
-                    // see http://nickfever.com/music/midi-cc-list
-                    for (int i = 0; i < 16; ++i)
-                    {
-                        // sustain pedal off
-                        midiTemp.addEvent (MidiMessage::controllerEvent (i + 1, 64, 0), 0);
-                        // Sostenuto off
-                        midiTemp.addEvent (MidiMessage::controllerEvent (i + 1, 66, 0), 0);
-                        // Hold off
-                        midiTemp.addEvent (MidiMessage::controllerEvent (i + 1, 69, 0), 0);
-
-                        midiTemp.addEvent (MidiMessage::allNotesOff (i + 1), 0);
-                    }
-                }
-                else if ((current == graph && graph->isSingle())
-                         || (current != nullptr && ! current->isSingle() && ! graph->isSingle()))
-                {
-                    // current single graph or parallel graphs get MIDI always
-                    midiTemp.addEvents (midi, 0, numSamples, 0);
-                }
-
-                {
-                    RenderContext rc (audioTemp, cvTemp, midiTemp, numSamples);
-                    const ScopedLock sl (graph->getPropertyLock());
-                    if (graph->isSuspended())
-                    {
-                        graph->renderBypassed (rc);
-                    }
-                    else
-                    {
-                        graph->render (rc);
-                    }
-                }
-
-                // clang-format off
-                if (graphChanged && ((current->isSingle() && graph == last) || 
-                                     (modeChanged && ! current->isSingle() && graph->isSingle() && graph == last)))
-
-                {
-                    // DBG("  FADE OUT LAST GRAPH: " << graph->engineIndex);
-                    for (int i = 0; i < numOutputChans; ++i)
-                        audioOut.addFromWithRamp (i, 0, audioTemp.getReadPointer (i), numSamples, 1.f, 0.f);
-                }
-                else if ((graph == current && graph->isSingle()) || (! graph->isSingle() && (current != nullptr) && ! current->isSingle()))
-                {
-                    // if it's the current single graph or both are parallel...
-                    if (graphChanged && (graph->isSingle() || (modeChanged && ! graph->isSingle() && ! current->isSingle())))
-                    {
-                        // DBG("  FADE IN NEW GRAPH: " << graph->engineIndex);
-                        for (int i = 0; i < numOutputChans; ++i)
-                            audioOut.addFromWithRamp (i, 0, audioTemp.getReadPointer (i), numSamples, 0.f, 1.f);
-                    }
-                    else
-                    {
-                        for (int i = 0; i < numOutputChans; ++i)
-                            audioOut.addFrom (i, 0, audioTemp, i, 0, numSamples);
-                    }
-
-                    midiOut.addEvents (midiTemp, 0, numSamples, 0);
-                }
-                // clang-format on
+                ProcessSingleThreaded(buffer, midi);
+            }
+            else
+            {
+                ProcessMultiThreaded(buffer, midi);
             }
 
             for (int i = 0; i < numChans; ++i)
@@ -211,7 +144,7 @@ struct RootGraphRender : public AsyncUpdater
         {
             midi.clear();
             for (int i = 0; i < buffer.getNumChannels(); ++i)
-                zeromem (buffer.getWritePointer (i), sizeof (float) * (size_t) numSamples);
+                zeromem (buffer.getWritePointer (i), sizeof (float) * (size_t)buffer.getNumSamples());
         }
 
         lastGraph = currentGraph;
@@ -229,6 +162,10 @@ struct RootGraphRender : public AsyncUpdater
             lastGraph = 0;
         }
 
+        if (taskManager)
+        {
+            multiThreadingTaskInfo.add(MultithreadingInfo(graph, audioOut.getNumChannels(), audioOut.getNumSamples()));
+        }
         return true;
     }
 
@@ -237,6 +174,7 @@ struct RootGraphRender : public AsyncUpdater
     {
         jassert (graphs.contains (graph));
         graphs.removeFirstMatchingValue (graph);
+        multiThreadingTaskInfo.removeIf([=](auto& info){ return info.graph == graph;});
         graph->engineIndex = -1;
         updateIndexes();
         if (currentGraph >= graphs.size())
@@ -250,10 +188,322 @@ struct RootGraphRender : public AsyncUpdater
     RootGraph* getGraph (const int i) const { return graphs.getUnchecked (i); }
     const Array<RootGraph*>& getGraphs() const { return graphs; }
 
+    /** not realtime safe! AudioEngine's callback should be locked when you call this */
+    void setMultithreadingConfig(const MultithreadingParams& params)
+    {
+        if (params.enabled)
+        {
+            if (taskManager == nullptr)
+                taskManager = std::make_unique<TaskManager>(params.threadCount);
+            else
+                taskManager->setNumThreads(params.threadCount);
+        }
+        else if (taskManager)
+        {
+            taskManager = nullptr;
+        }
+
+        setupGraphArrayForMultihreading();
+    }
+
 private:
     Array<RootGraph*> graphs;
+
+    void ProcessSingleThreaded(AudioSampleBuffer& buffer, MidiBuffer& midi)
+    {
+        auto* const current = getCurrentGraph();
+        auto* const last = (lastGraph >= 0 && lastGraph < graphs.size()) ? getGraph (lastGraph) : nullptr;
+
+        const int numSamples = buffer.getNumSamples();
+        const int numChans = buffer.getNumChannels();
+        const bool graphChanged = lastGraph != currentGraph;
+        const RootGraph::RenderMode mode = current->getRenderMode();
+        const bool modeChanged = graphChanged && mode != last->getRenderMode();
+
+        audioOut.setSize (numChans, numSamples, false, false, true);
+        audioTemp.setSize (numChans, numSamples, false, false, true);
+
+        // clear the mixing area
+        for (int i = numChans; --i >= 0;)
+            audioOut.clear (i, 0, numSamples);
+        midiOut.clear();
+
+        for (auto* const graph : graphs)
+        {
+            // copy inputs, clear outs if more than input count
+            for (int i = 0; i < numInputChans; ++i)
+                audioTemp.copyFrom (i, 0, buffer, i, 0, numSamples);
+            for (int i = numInputChans; i < numChans; ++i)
+                audioTemp.clear (i, 0, numSamples);
+
+            // avoids feedback loop when IO node ins are
+            // connected to IO node outs
+            midiTemp.clear (0, numSamples);
+
+            if ((last == graph && graphChanged && last->isSingle())
+                || (graphChanged && current != nullptr && current->isSingle() && graph != current))
+            {
+                // send kill messages to the last graph(s) when the graph changes
+                // see http://nickfever.com/music/midi-cc-list
+                for (int i = 0; i < 16; ++i)
+                {
+                    // sustain pedal off
+                    midiTemp.addEvent (MidiMessage::controllerEvent (i + 1, 64, 0), 0);
+                    // Sostenuto off
+                    midiTemp.addEvent (MidiMessage::controllerEvent (i + 1, 66, 0), 0);
+                    // Hold off
+                    midiTemp.addEvent (MidiMessage::controllerEvent (i + 1, 69, 0), 0);
+
+                    midiTemp.addEvent (MidiMessage::allNotesOff (i + 1), 0);
+                }
+            }
+            else if ((current == graph && graph->isSingle())
+                        || (current != nullptr && ! current->isSingle() && ! graph->isSingle()))
+            {
+                // current single graph or parallel graphs get MIDI always
+                midiTemp.addEvents (midi, 0, numSamples, 0);
+            }
+
+            {
+                RenderContext rc (audioTemp, cvTemp, midiTemp, numSamples);
+                const ScopedLock sl (graph->getPropertyLock());
+                if (graph->isSuspended())
+                {
+                    graph->renderBypassed (rc);
+                }
+                else
+                {
+                    graph->render (rc);
+                }
+            }
+
+            // clang-format off
+            if (graphChanged && ((current->isSingle() && graph == last) || 
+                                 (modeChanged && ! current->isSingle() && graph->isSingle() && graph == last)))
+
+            {
+                // DBG("  FADE OUT LAST GRAPH: " << graph->engineIndex);
+                for (int i = 0; i < numOutputChans; ++i)
+                    audioOut.addFromWithRamp (i, 0, audioTemp.getReadPointer (i), numSamples, 1.f, 0.f);
+            }
+            else if ((graph == current && graph->isSingle()) || (! graph->isSingle() && (current != nullptr) && ! current->isSingle()))
+            {
+                // if it's the current single graph or both are parallel...
+                if (graphChanged && (graph->isSingle() || (modeChanged && ! graph->isSingle() && ! current->isSingle())))
+                {
+                    // DBG("  FADE IN NEW GRAPH: " << graph->engineIndex);
+                    for (int i = 0; i < numOutputChans; ++i)
+                        audioOut.addFromWithRamp (i, 0, audioTemp.getReadPointer (i), numSamples, 0.f, 1.f);
+                }
+                else
+                {
+                    for (int i = 0; i < numOutputChans; ++i)
+                        audioOut.addFrom (i, 0, audioTemp, i, 0, numSamples);
+                }
+
+                midiOut.addEvents (midiTemp, 0, numSamples, 0);
+            }
+            // clang-format on
+        }
+
+    }
+
+    void ProcessMultiThreaded(AudioSampleBuffer& buffer, MidiBuffer& midi)
+    {
+        auto* const current = getCurrentGraph();
+        auto* const last = (lastGraph >= 0 && lastGraph < graphs.size()) ? getGraph (lastGraph) : nullptr;
+
+        const int numSamples = buffer.getNumSamples();
+        const int numChans = buffer.getNumChannels();
+        const bool graphChanged = lastGraph != currentGraph;
+        const bool fadeOutgoingGraphs = false /* graphChanged && current->isSingle() */;
+        const RootGraph::RenderMode mode = current->getRenderMode();
+        const bool modeChanged = graphChanged && mode != last->getRenderMode();
+
+        audioOut.setSize (numChans, numSamples, false, false, true);
+
+        // clear the mixing area
+        for (int i = numChans; --i >= 0;)
+            audioOut.clear (i, 0, numSamples);
+        midiOut.clear();
+
+        std::vector<Task::Function> tasks;
+        for (auto& taskInfo : multiThreadingTaskInfo)
+        {
+            taskInfo.audioTemp.setSize (numChans, numSamples, false, false, true);
+
+            // copy inputs, clear outs if more than input count
+            for (int i = 0; i < numInputChans; ++i)
+                taskInfo.audioTemp.copyFrom (i, 0, buffer, i, 0, numSamples);
+            for (int i = numInputChans; i < numChans; ++i)
+                taskInfo.audioTemp.clear (i, 0, numSamples);
+
+            // avoids feedback loop when IO node ins are
+            // connected to IO node outs
+            taskInfo.midiTemp.clear (0, numSamples);
+
+            if ((last == taskInfo.graph && graphChanged && last->isSingle())
+                || (graphChanged && current != nullptr && current->isSingle() && taskInfo.graph != current))
+            {
+                // send kill messages to the last graph(s) when the graph changes
+                // see http://nickfever.com/music/midi-cc-list
+                for (int i = 0; i < 16; ++i)
+                {
+                    // sustain pedal off
+                    taskInfo.midiTemp.addEvent (MidiMessage::controllerEvent (i + 1, 64, 0), 0);
+                    // Sostenuto off
+                    taskInfo.midiTemp.addEvent (MidiMessage::controllerEvent (i + 1, 66, 0), 0);
+                    // Hold off
+                    taskInfo.midiTemp.addEvent (MidiMessage::controllerEvent (i + 1, 69, 0), 0);
+
+                    taskInfo.midiTemp.addEvent (MidiMessage::allNotesOff (i + 1), 0);
+
+                    // since we are in 'single' mode, and we are "stopping"
+                    // the previous graph, we'll do more than just tell it to 
+                    // 'note-off' sounding notes... we'll tell it to stop all
+                    // sound. 
+                    taskInfo.midiTemp.addEvent (MidiMessage::allSoundOff (i + 1), 0);
+                }
+            }
+            else if ((current == taskInfo.graph && taskInfo.graph->isSingle())
+                        || (current != nullptr && ! current->isSingle() && ! taskInfo.graph->isSingle()))
+            {
+                // current single graph or parallel graphs get MIDI always
+               taskInfo.midiTemp.addEvents (midi, 0, numSamples, 0);
+            }
+
+            {
+                bool graphIsInBackground = current != nullptr && current != taskInfo.graph && current->isSingle();
+                //if (taskInfo.graph->isSuspended())
+                if (taskInfo.graph->isSuspended())
+                {
+                    tasks.push_back([&taskInfo, graphIsInBackground](){taskInfo.Render(true, graphIsInBackground);});
+                }
+                else
+                {
+                    tasks.push_back([&taskInfo, graphIsInBackground](){taskInfo.Render(false, graphIsInBackground);});
+                }
+            }
+        }
+
+        // now submit all the tasks to the task manager...
+        TaskHandle taskHandle = taskManager->postTasks(tasks);
+        taskManager->wait (taskHandle);
+
+        for (auto& taskInfo : multiThreadingTaskInfo)
+        {
+            // clang-format off
+            if (graphChanged && ((current->isSingle() && taskInfo.graph == last) || 
+                                    (taskInfo.graph != current && fadeOutgoingGraphs) ||
+                                    (modeChanged && ! current->isSingle() && taskInfo.graph->isSingle() && taskInfo.graph == last)))
+
+            {
+                // DBG("  FADE OUT LAST GRAPH: " << graph->engineIndex);
+                for (int i = 0; i < numOutputChans; ++i)
+                    audioOut.addFromWithRamp (i, 0, taskInfo.audioTemp.getReadPointer (i), numSamples, 1.f, 0.f);
+            }
+            else if ((taskInfo.graph == current && taskInfo.graph->isSingle()) || 
+                     (! taskInfo.graph->isSingle() && (current != nullptr) && ! current->isSingle()) ||
+                     (taskInfo.graphIsInBackground && !taskInfo.graphWentSilentSinceGoingBackground))
+            {
+                // if it's the current single graph or both are parallel...
+                if (graphChanged && (taskInfo.graph->isSingle() || (modeChanged && ! taskInfo.graph->isSingle() && ! current->isSingle())))
+                {
+                    // DBG("  FADE IN NEW GRAPH: " << graph->engineIndex);
+                    for (int i = 0; i < numOutputChans; ++i)
+                        audioOut.addFromWithRamp (i, 0, taskInfo.audioTemp.getReadPointer (i), numSamples, 0.f, 1.f);
+                }
+                else
+                {
+                    for (int i = 0; i < numOutputChans; ++i)
+                        audioOut.addFrom (i, 0, taskInfo.audioTemp, i, 0, numSamples);
+                }
+
+                midiOut.addEvents (taskInfo.midiTemp, 0, numSamples, 0);
+            }
+            // clang-format on
+        }
+
+    }
+
+    static bool BufferIsNearSilent(const juce::AudioBuffer<float>& buffer, float thresholdDb = -60.0f)
+    {
+        // Convert dB threshold to linear gain (e.g., -60 dB ~ 0.001f)
+        const float thresholdLinear = juce::Decibels::decibelsToGain(thresholdDb);
+        
+        const int numChannels = buffer.getNumChannels();
+        const int numSamples = buffer.getNumSamples();
+
+        for (int ch = 0; ch < numChannels; ++ch)
+        {
+            // SIMD-accelerated check to find peak absolute magnitude
+            juce::Range<float> range = juce::FloatVectorOperations::findMinAndMax(
+                buffer.getReadPointer(ch), 
+                numSamples
+            );
+
+            // Check if either peak positive or peak negative exceeds threshold
+            if (std::abs(range.getStart()) > thresholdLinear || std::abs(range.getEnd()) > thresholdLinear)
+                return false; // Sound detected, exit early
+        }
+
+        return true; // All channels are below threshold
+    }
+    struct MultithreadingInfo
+    {
+        AudioSampleBuffer audioTemp;
+        AudioSampleBuffer cvTemp;
+        MidiBuffer midiTemp;
+        RootGraph* graph;
+        
+        // true if the current graph is NOT this one and the current graph in 'single' mode,
+        // AND this graph has gone quiet enough to stop rendering it...
+        bool graphIsInBackground = false;
+        bool graphWentSilentSinceGoingBackground = false; 
+
+        MultithreadingInfo(RootGraph* inGraph, const int numChannels, const int numSamples)
+        {
+            graph = inGraph;
+            audioTemp.setSize (numChannels, numSamples);
+        }
+
+        void Render(bool bypassed, bool isInBackground)
+        {
+            RenderContext rc (audioTemp, cvTemp, midiTemp, audioTemp.getNumSamples());
+            const ScopedLock sl (graph->getPropertyLock());
+            // this logic related to being in the background lets us continue to play the 
+            // 'tail' of any sound coming from the processor, but then stop
+            // rendering it once it is silent.
+            if (bypassed || (isInBackground && graphWentSilentSinceGoingBackground))
+            {
+                graph->renderBypassed (rc);
+            }
+            else
+            {
+                graph->render (rc);
+            }
+
+            graphIsInBackground = isInBackground;
+            if (graphIsInBackground)
+            {
+                if (!graphWentSilentSinceGoingBackground)
+                {
+                    graphWentSilentSinceGoingBackground = BufferIsNearSilent(audioTemp);
+                }
+            }
+            else
+            {
+                graphWentSilentSinceGoingBackground = false;
+            }
+        }
+    };
+
+    Array<MultithreadingInfo> multiThreadingTaskInfo;
+    std::unique_ptr<TaskManager> taskManager;
+
     int currentGraph = -1;
     int lastGraph = -1;
+
 
     struct ProgramRequest
     {
@@ -293,6 +543,23 @@ private:
 
         return currentGraph;
     }
+
+    void setupGraphArrayForMultihreading()
+    {
+        if (taskManager)
+        {
+            multiThreadingTaskInfo.clear();
+            for (RootGraph* graph : graphs)
+            {
+                multiThreadingTaskInfo.add(MultithreadingInfo(graph, audioOut.getNumChannels(), audioOut.getNumSamples()));
+            }
+        }
+        else
+        {
+            multiThreadingTaskInfo.clear();
+        }
+    }
+
 };
 
 class AudioEngine::Private : public AudioIODeviceCallback,
@@ -737,6 +1004,12 @@ public:
         return sessionWantsExternalClock.get() > 0 && processMidiClock.get() > 0;
     }
 
+    void SetMultithreadingConfig(const MultithreadingParams& params)
+    {
+        ScopedLock sl (lock);
+        graphs.setMultithreadingConfig(params);
+    }
+
 private:
     friend class AudioEngine;
     AudioEngine& engine;
@@ -900,6 +1173,8 @@ void AudioEngine::applySettings (Settings& settings)
     }
 
     priv->startStopCont.set (settings.transportRespondToStartStopContinue() ? 1 : 0);
+
+    priv->SetMultithreadingConfig (settings.getMultithreadingParams());
 }
 
 bool AudioEngine::removeGraph (RootGraph* graph)
