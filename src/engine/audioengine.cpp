@@ -927,8 +927,8 @@ public:
             graphs.removeGraph (graph);
             // keep the requested index valid, otherwise a stale index gets
             // written back into the session model by onCurrentGraphChanged()
-            if (currentGraph.get() >= graphs.size())
-                currentGraph.set (graphs.size() - 1);
+            if (activeGraphIndex.get() >= graphs.size())
+                activeGraphIndex.set (graphs.size() - 1);
         }
 
         graph->renderingSequenceChanged.disconnect_all_slots();
