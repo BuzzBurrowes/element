@@ -275,7 +275,11 @@ public:
         }
         else
         {
-            buffer.applyGain (0, numSamples, node->getInputGain());
+            float inputGain = node->getInputGain();
+            // withing 1/50th of a dB we will call it a gain of 1.0
+            // and skip this needless processing...
+            if (inputGain > 1.002f || inputGain < 0.998f)
+                buffer.applyGain (0, numSamples, inputGain);
         }
 
         for (int i = numAudioIns; --i >= 0;)
@@ -440,8 +444,12 @@ public:
             buffer.applyGainRamp (0, numSamples, node->getLastGain(), node->getGain());
         }
         else
-        {
-            buffer.applyGain (0, numSamples, node->getGain());
+        {   
+            float outputGain = node->getGain();
+            // withing 1/50th of a dB we will call it a gain of 1.0
+            // and skip this needless processing...
+            if (outputGain > 1.002f || outputGain < 0.998f)
+                buffer.applyGain (0, numSamples, outputGain);
         }
 
         node->updateGain();
