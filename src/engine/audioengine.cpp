@@ -61,7 +61,7 @@ struct RootGraphRender : public AsyncUpdater
         audioTemp.setSize (jmax (numIns, numOuts), numSamples);
         audioOut.setSize (audioTemp.getNumChannels(), audioTemp.getNumSamples());
 
-        for (auto& task : multiThreadingTaskInfo)
+        for (auto& task : renderTaskList)
         {
             task.audioTemp.setSize (jmax (numIns, numOuts), numSamples);
         }
@@ -75,7 +75,7 @@ struct RootGraphRender : public AsyncUpdater
         audioTemp.setSize (1, 1);
         audioOut.setSize (1, 1);
 
-        for (auto& task : multiThreadingTaskInfo)
+        for (auto& task : renderTaskList)
         {
             task.midiTemp.clear();
             task.audioTemp.setSize (1, 1);
@@ -161,7 +161,7 @@ struct RootGraphRender : public AsyncUpdater
 
         if (taskManager)
         {
-            multiThreadingTaskInfo.add (MultithreadingInfo (graph, audioOut.getNumChannels(), audioOut.getNumSamples()));
+            renderTaskList.add (RenderTask (graph, audioOut.getNumChannels(), audioOut.getNumSamples()));
         }
         return true;
     }
@@ -171,7 +171,7 @@ struct RootGraphRender : public AsyncUpdater
     {
         jassert (graphs.contains (graph));
         graphs.removeFirstMatchingValue (graph);
-        multiThreadingTaskInfo.removeIf ([=] (auto& info) { return info.graph == graph; });
+        renderTaskList.removeIf ([=] (auto& info) { return info.graph == graph; });
 
         graph->engineIndex = -1;
         updateIndexes();
@@ -328,15 +328,12 @@ private:
             return;
         }
 
-        const bool switchedActiveGraph = priorActiveGraphIndex != activeGraphIndex;
-        const bool renderModeChanged = switchedActiveGraph && activeGraph->getRenderMode() != priorActiveGraph->getRenderMode();
-
         const int numOutputSamples = buffer.getNumSamples();
         const int numOutputChans = buffer.getNumChannels();
 
         /** Loop over the list of tasks (there is one for every graph) and build the task functions*/
         std::vector<Task::Function> taskFunctions;
-        for (auto& task : multiThreadingTaskInfo)
+        for (auto& task : renderTaskList)
         {
             task.audioTemp.setSize (numOutputChans, numOutputSamples, false, false, true);
 
@@ -379,7 +376,7 @@ private:
         TaskHandle taskHandle = taskManager->postTasks (taskFunctions);
         taskManager->wait (taskHandle);
 
-        for (auto& task : multiThreadingTaskInfo)
+        for (auto& task : renderTaskList)
         {
             const bool thisGraphIsForegroundThisFrame = task.graph == activeGraph ||
                                                         (activeGraph->isParallel() && task.graph->isParallel());
@@ -476,7 +473,7 @@ private:
         return activeGraphIndex;
     }
 
-    struct MultithreadingInfo
+    struct RenderTask
     {
         AudioSampleBuffer audioTemp;
         AudioSampleBuffer cvTemp;
@@ -488,7 +485,7 @@ private:
         bool graphIsInBackground = false;
         bool graphWentSilentSinceGoingBackground = false;
 
-        MultithreadingInfo (RootGraph* inGraph, const int numChannels, const int numSamples)
+        RenderTask (RootGraph* inGraph, const int numChannels, const int numSamples)
         {
             graph = inGraph;
             audioTemp.setSize (numChannels, numSamples);
@@ -529,22 +526,22 @@ private:
         }
     };
 
-    Array<MultithreadingInfo> multiThreadingTaskInfo;
+    Array<RenderTask> renderTaskList;
     std::unique_ptr<TaskManager> taskManager;
 
     void setupGraphArrayForMultihreading()
     {
         if (taskManager)
         {
-            multiThreadingTaskInfo.clear();
+            renderTaskList.clear();
             for (RootGraph* graph : graphs)
             {
-                multiThreadingTaskInfo.add (MultithreadingInfo (graph, audioOut.getNumChannels(), audioOut.getNumSamples()));
+                renderTaskList.add (RenderTask (graph, audioOut.getNumChannels(), audioOut.getNumSamples()));
             }
         }
         else
         {
-            multiThreadingTaskInfo.clear();
+            renderTaskList.clear();
         }
     }
 };
