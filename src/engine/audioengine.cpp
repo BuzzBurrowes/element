@@ -13,7 +13,6 @@
 #include "engine/miditranspose.hpp"
 #include "engine/rootgraph.hpp"
 #include "engine/midipanic.hpp"
-#include "engine/trace.hpp"
 #include "engine/tasksystem.hpp"
 
 #include "tempo.hpp"
