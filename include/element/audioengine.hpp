@@ -50,6 +50,19 @@ public:
     bool addGraph (RootGraph* graph);
     bool removeGraph (RootGraph* graph);
 
+    /** Moves a root graph to a new position in the render order.
+
+        Engine indexes of all graphs are updated and the active graph stays
+        active. This is not an active graph change, so no crossfade or async
+        notification is triggered.
+
+        @param from The current engine index of the graph to move.
+        @param to   The engine index the graph should be moved to.
+        @return true if the graph was moved, false if either index was out of
+                range or the indexes were equal.
+    */
+    bool moveGraph (const int from, const int to);
+
     void setActiveGraphIndex (const int index);
     int getActiveGraphIndex() const;
 
@@ -61,6 +74,16 @@ public:
     void setMeter (int beatsPerBar, int beatType);
 
     void togglePlayPause();
+
+    /** Performs a transport bar action, see Transport::requestAction().
+
+        When hosted as a plugin the host playhead re-applies its own play and
+        record state every block, so the action is overridden there exactly as
+        the on-screen buttons are.
+
+        @param action The action to perform
+    */
+    void performTransportAction (TransportAction action);
 
     juce::MidiKeyboardState& getKeyboardState();
     Transport::MonitorPtr getTransportMonitor() const;
@@ -92,6 +115,16 @@ public:
     void processExternalBuffers (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi);
     void processExternalPlayhead (juce::AudioPlayHead* playhead, const int nframes);
     void releaseExternalResources();
+
+    /** Sets the audio workgroup that render worker threads should join.
+
+        For external systems that are handed a workgroup by their host. Safe to
+        call from the audio thread. Has no effect on platforms without workgroups.
+
+        @param workgroup the workgroup provided by the host
+    */
+    void setAudioWorkgroup (const juce::AudioWorkgroup& workgroup);
+
     void updateExternalLatencySamples();
     int getExternalLatencySamples() const;
 

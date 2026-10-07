@@ -21,6 +21,7 @@
 #include <element/datapath.hpp>
 #include "services/deviceservice.hpp"
 #include "services/sessionservice.hpp"
+#include "crashlog.hpp"
 #include "log.hpp"
 #include "messages.hpp"
 #include "auth.hpp"
@@ -210,7 +211,9 @@ bool Application::moreThanOneInstanceAllowed() { return true; }
 
 void Application::initialise (const String& commandLine)
 {
-    world = std::make_unique<Context> (RunMode::Standalone, commandLine);
+    // Neither the plugin scanner worker nor a secondary instance may build a
+    // Context: doing so would open the user's settings and rewrite them from a
+    // stale snapshot at shutdown.
     if (maybeLaunchScannerWorker (commandLine))
         return;
 
@@ -220,6 +223,12 @@ void Application::initialise (const String& commandLine)
         return;
     }
 
+    // Only the real application gets crash logging: the scanner worker keeps
+    // its own no-op handler (installed by its constructor above), and a plugin
+    // never runs this code at all.
+    CrashLog::install (Log::getMainLogFile());
+
+    world = std::make_unique<Context> (RunMode::Standalone, commandLine);
     initializeModulePath();
     printCopyNotice();
 
@@ -250,7 +259,8 @@ bool Application::canShutdown()
         return result.has_value() ? *result : true;
     }
 
-    if (auto app = dynamic_cast<Application*> (getInstance()))
+    auto* const app = dynamic_cast<Application*> (getInstance());
+    if (app != nullptr && app->world != nullptr)
     {
         auto& services = app->world->services();
         auto ssvc = services.find<SessionService>();
@@ -262,6 +272,8 @@ bool Application::canShutdown()
 
 void Application::shutdown()
 {
+    workers.clearQuick (true);
+
     if (! world)
         return;
 
@@ -272,7 +284,6 @@ void Application::shutdown()
 #if JUCE_LINUX
     applyMidiSettings.reset();
 #endif
-    workers.clearQuick (true);
     auto& srvs = world->services();
     srvs.saveSettings();
 
@@ -300,11 +311,15 @@ void Application::shutdown()
 
     if (auto el = world->devices().createStateXml())
         props->setValue (Settings::devicesKey, el.get());
+    settings.saveIfNeeded();
 
     engine = nullptr;
     Logger::setCurrentLogger (nullptr);
     world->setEngine (nullptr);
     world = nullptr;
+
+    // Last: crashes during engine/plugin teardown above are still logged.
+    CrashLog::uninstall();
 }
 
 void Application::systemRequestedQuit()
@@ -462,7 +477,7 @@ void Application::printCopyNotice()
 bool Application::maybeLaunchScannerWorker (const String& commandLine)
 {
     workers.clearQuick (true);
-    workers.add (world->plugins().createAudioPluginScannerWorker());
+    workers.add (PluginManager::createAudioPluginScannerWorker());
     StringArray processIds = { EL_PLUGIN_SCANNER_PROCESS_ID };
     for (auto* worker : workers)
     {

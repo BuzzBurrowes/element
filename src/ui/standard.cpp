@@ -248,6 +248,8 @@ public:
         lastSecondaryHeight = jmax (50, lastSecondaryHeight);
         showAccessoryView = props->getIntValue ("ContentContainer_showAccessoryView", showAccessoryView);
         auto lastSecondaryName = props->getValue ("ContentContainer_lastSecondaryView");
+        if (lastSecondaryName.trim() == EL_VIEW_CONSOLE_LEGACY)
+            lastSecondaryName = EL_VIEW_CONSOLE;
         if (showAccessoryView)
         {
             owner.setSecondaryView (lastSecondaryName.trim());
@@ -1065,6 +1067,7 @@ void StandardContent::getCommandInfo (CommandID commandID, ApplicationCommandInf
             int flags = (showAccessoryView() && getAccessoryViewName() == EL_VIEW_CONSOLE)
                             ? Info::isTicked
                             : 0;
+            result.addDefaultKeypress (KeyPress::F3Key, 0);
             result.setInfo ("Console", "Show the scripting console", "UI", flags);
             break;
         }
@@ -1230,6 +1233,14 @@ void StandardContent::getSessionState (String& state)
         }
     }
 
+    if (auto* const stp = nav->findPanel<SessionTreePanel>())
+    {
+        String stpState;
+        stp->getState (stpState);
+        if (stpState.isNotEmpty())
+            data.setProperty ("SessionTreePanel", stpState, nullptr);
+    }
+
     MemoryOutputStream mo;
     {
         GZIPCompressorOutputStream gzip (mo, 9);
@@ -1260,6 +1271,9 @@ void StandardContent::applySessionState (const String& state)
         String npvState = data.getProperty ("NodePropertiesView").toString();
         npv->setState (npvState);
     }
+
+    if (auto* const stp = nav->findPanel<SessionTreePanel>())
+        stp->setState (data.getProperty ("SessionTreePanel").toString());
 }
 
 void StandardContent::presentView (const juce::String& view)

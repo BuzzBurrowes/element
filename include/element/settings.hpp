@@ -35,6 +35,10 @@ public:
     static const char* hidePluginWindowsWhenFocusLostKey;
     static const char* lastGraphKey;
     static const char* lastSessionKey;
+    /** Session a launch was opening; present at startup means the last run died while opening it. */
+    static const char* startupPendingSessionKey;
+    /** False from startup until a clean shutdown records true. */
+    static const char* cleanShutdownKey;
     static const char* legacyInterfaceKey;
     static const char* midiEngineKey;
     static const char* oscHostPortKey;
@@ -187,10 +191,10 @@ public:
     /** Get global midi panic settings. */
     MidiPanicParams getMidiPanicParams() const;
 
-    /** Set global midi panic settings. */
+    /** Set global multithreaded rendering settings. */
     void setMultithreadingParams (MultithreadingParams);
 
-    /** Get global midi panic settings. */
+    /** Get global multithreaded rendering settings. */
     MultithreadingParams getMultithreadingParams() const;
 
     void setTransportRespondToStartStopContinue (bool shouldRespond);
